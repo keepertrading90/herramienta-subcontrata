@@ -1,0 +1,605 @@
+<!DOCTYPE html>
+<html lang="es">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RPK Control Tower | Simulador Make or Buy</title>
+    <!-- Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <!-- Scripts CDN -->
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- PDF Generation Libraries -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.5.28/jspdf.plugin.autotable.min.js"></script>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        rpk: {
+                            bg: '#0f0f0f',
+                            panel: '#1a1a1a',
+                            accent: '#E30613',
+                            text: '#ffffff',
+                            muted: '#9ca3af'
+                        }
+                    },
+                    fontFamily: {
+                        sans: ['Inter', 'sans-serif'],
+                    }
+                }
+            }
+        }
+    </script>
+    <style type="text/tailwindcss">
+        @layer base {
+            body { @apply bg-rpk-bg text-rpk-text font-sans antialiased; }
+        }
+        .glass { @apply bg-rpk-panel bg-opacity-60 backdrop-blur-md border border-white/10; }
+        .input-rpk { @apply bg-rpk-bg border border-white/10 rounded-lg p-2.5 focus:border-rpk-accent outline-none transition-all text-sm; }
+        .card-kpi { @apply glass rounded-xl p-6 transition-all hover:scale-[1.02]; }
+        input[type="number"]::-webkit-inner-spin-button, 
+        input[type="number"]::-webkit-outer-spin-button { 
+            -webkit-appearance: none; 
+            margin: 0; 
+        }
+    </style>
+</head>
+
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useMemo } = React;
+
+        const App = () => {
+            const [form, setForm] = useState({
+                referencia: "REF-001X",
+                cantidad: 10000,
+                cadenciaInterna: 500,
+                palets: 2,
+                esControlNuevo: false,
+                semanasReoferta: 4,
+                plazoSemanas: 2,
+                costeHorario: 25.37,
+                costeUnitario: 0.025,
+                cadenciaPrometida: 1000,
+                jornadaLaboral: 8,
+                costePorPalet: 80,
+                costeAdmin: 50,
+                viajes: 1,
+                subcontrataNombre: "",
+                touchedCadencia: false
+            });
+
+            const [historical, setHistorical] = useState(() => {
+                const saved = localStorage.getItem('rpk_nexus_history');
+                return saved ? JSON.parse(saved) : [];
+            });
+
+            useEffect(() => {
+                localStorage.setItem('rpk_nexus_history', JSON.stringify(historical));
+            }, [historical]);
+
+            // Ghost-fill Logic
+            const handleCostChange = (type, value) => {
+                const val = parseFloat(value) || 0;
+                if (type === 'horario_sub') {
+                    setForm(prev => ({
+                        ...prev,
+                        costeHorarioSub: val,
+                        touchedCadencia: true,
+                        costeUnitario: prev.cadenciaPrometida > 0 ? Number((val / prev.cadenciaPrometida).toFixed(4)) : prev.costeUnitario
+                    }));
+                } else if (type === 'unitario') {
+                    setForm(prev => ({
+                        ...prev,
+                        costeUnitario: val,
+                        touchedCadencia: true,
+                        costeHorarioSub: Number((val * (prev.cadenciaPrometida || prev.cadenciaInterna)).toFixed(2))
+                    }));
+                }
+            };
+
+            const handleGeneralChange = (field, value) => {
+                setForm(prev => {
+                    const newState = { ...prev, [field]: value };
+
+                    if (field === 'palets') {
+                        newState.viajes = Math.ceil(value / 2);
+                    }
+
+                    if (field === 'cadenciaPrometida') {
+                        newState.touchedCadencia = true;
+                    }
+
+                    // If vendor cadence changes and we are simulating by cost/hour, update the unit cost
+                    if (field === 'cadenciaPrometida' && prev.costeHorarioSub > 0) {
+                        newState.costeUnitario = Number((prev.costeHorarioSub / value).toFixed(4));
+                    }
+
+                    return newState;
+                });
+            };
+
+            // Auto-sync break-even cadence
+            useEffect(() => {
+                if (!form.touchedCadencia) {
+                    const cLog = (form.costePorPalet * form.palets) + (form.costeAdmin * (form.viajes || 1));
+                    const divisor = (1 / form.cadenciaInterna) - (cLog / (form.cantidad * form.costeHorario));
+                    if (divisor > 0) {
+                        const minViable = Math.ceil(1 / divisor);
+                        setForm(prev => ({ ...prev, cadenciaPrometida: minViable }));
+                    }
+                }
+            }, [form.cantidad, form.cadenciaInterna, form.costeHorario, form.palets, form.costePorPalet, form.costeAdmin, form.viajes]);
+
+            // Calculations
+            const calculations = useMemo(() => {
+                const { cantidad, cadenciaInterna, palets, viajes, costeHorario, costeUnitario, cadenciaPrometida, jornadaLaboral, costePorPalet, costeAdmin } = form;
+
+                const cLog = (costePorPalet * palets) + (costeAdmin * (viajes || 1));
+
+                // Breaking point
+                const divisor = (1 / form.cadenciaInterna) - (cLog / (form.cantidad * form.costeHorario));
+                const cadenciaExigida = divisor > 0 ? 1 / divisor : 0;
+
+                const horasInternas = form.cantidad / (form.cadenciaInterna || 1);
+
+                // If vendor cadence is 0, use internal cadence as an estimate for time-based KPIs
+                const cadenciaSimulada = form.cadenciaPrometida || form.cadenciaInterna || 1;
+                const horasExternas = form.cantidad / cadenciaSimulada;
+
+                // Correct Concept: Liberated hours are the hours the RPK machines ARE NOT running this job.
+                const horasLiberadas = horasInternas;
+
+                const ahorroNeto = (horasInternas * form.costeHorario) - ((form.cantidad * form.costeUnitario) + cLog);
+                const diasEjecucion = horasExternas / form.jornadaLaboral;
+
+                // Blocking logic
+                const blockedByTime = form.esControlNuevo && (form.plazoSemanas < form.semanasReoferta);
+                const resultsInLoss = ahorroNeto <= 0;
+                const isInviable = divisor <= 0;
+
+                const status = (blockedByTime || resultsInLoss || isInviable) ? 'RED' : 'GREEN';
+
+                const precioObjetivo = (form.costeHorario / (form.cadenciaInterna || 1)) - (cLog / (form.cantidad || 1));
+
+                return {
+                    cLog,
+                    cadenciaExigida,
+                    precioObjetivo,
+                    horasLiberadas,
+                    ahorroNeto,
+                    diasEjecucion,
+                    status,
+                    blockedByTime,
+                    isInviable,
+                    usingEstimate: !form.cadenciaPrometida
+                };
+            }, [form]);
+
+            const exportPDF = (historicalItem = null) => {
+                const jsPDFConst = (window.jspdf && window.jspdf.jsPDF) || window.jsPDF || window.jspdf;
+                
+                if (typeof jsPDFConst !== 'function') {
+                    alert("Error: No se pudo instanciar la librería PDF. Reintente en unos segundos.");
+                    return;
+                }
+
+                // Safety check for legacy history items (no snapshot)
+                const hasSnapshot = historicalItem && historicalItem.snapshot;
+                const reportForm = hasSnapshot ? historicalItem.snapshot.form : form;
+                const reportCalcs = hasSnapshot ? historicalItem.snapshot.calculations : calculations;
+
+                const doc = new jsPDFConst();
+                
+                if (!doc.autoTable) {
+                    alert("Error: El plugin de tablas (autoTable) no está cargado.");
+                    return;
+                }
+
+                // Color Palette
+                const rpkRed = [227, 6, 19];
+
+                // Header
+                doc.setFillColor(...rpkRed);
+                doc.rect(0, 0, 210, 40, 'F');
+                doc.setTextColor(255, 255, 255);
+                doc.setFontSize(22);
+                doc.text("RPK NEXUS | Simulador Make or Buy", 15, 20);
+                doc.setFontSize(10);
+                doc.text(`Reporte de Decisión Estratégica - Ref: ${reportForm.referencia}`, 15, 30);
+                doc.text(`Subcontrata: ${reportForm.subcontrataNombre || 'N/A'}`, 15, 35);
+                doc.text(`Fecha: ${historicalItem ? historicalItem.date : new Date().toLocaleDateString()}`, 160, 30);
+
+                // Section 1: Internal Data
+                doc.setTextColor(0, 0, 0);
+                doc.setFontSize(14);
+                doc.text("1. DATOS INTERNOS (RPK)", 15, 55);
+
+                const internalData = [
+                    ["Referencia", reportForm.referencia],
+                    ["Cantidad del Lote", reportForm.cantidad.toLocaleString() + " uds"],
+                    ["Cadencia Interna", reportForm.cadenciaInterna + " pzs/h"],
+                    ["Coste Horario RPK", reportForm.costeHorario + " €/h"],
+                    ["Nº Palets", reportForm.palets],
+                    ["Nº Viajes", reportForm.viajes],
+                    ["Carga de Trabajo Interna", reportCalcs.horasLiberadas.toFixed(1) + " h"]
+                ];
+
+                if (doc.autoTable) {
+                    doc.autoTable({
+                        startY: 60,
+                        head: [["Parámetro", "Valor"]],
+                        body: internalData,
+                        theme: 'striped',
+                        headStyles: { fillColor: [60, 60, 60] }
+                    });
+                }
+
+                const startY2 = doc.lastAutoTable ? doc.lastAutoTable.finalY + 15 : 120;
+                doc.text("2. ESCENARIO DE SUBCONTRATACIÓN", 15, startY2);
+
+                const subData = [
+                    ["Coste Unitario Sub.", reportForm.costeUnitario.toFixed(4) + " €/pz"],
+                    ["Coste Logístico (Total)", reportCalcs.cLog + " €"],
+                    ["Cadencia Prometida", (reportForm.cadenciaPrometida || "No facilitada (Usa estimación Est.)") + " pzs/h"],
+                    ["Plazo de Ejecución", reportCalcs.diasEjecucion.toFixed(1) + " días lab."],
+                    ["Coste Total Externo", ((reportForm.cantidad * reportForm.costeUnitario) + reportCalcs.cLog).toFixed(2) + " €"]
+                ];
+
+                if (doc.autoTable) {
+                    doc.autoTable({
+                        startY: startY2 + 5,
+                        head: [["Parámetro", "Valor"]],
+                        body: subData,
+                        theme: 'striped',
+                        headStyles: { fillColor: [0, 80, 160] }
+                    });
+                }
+
+                const startY3 = doc.lastAutoTable ? doc.lastAutoTable.finalY + 15 : 180;
+                doc.text("3. CONCLUSIÓN Y OBJETIVOS DE NEGOCIACIÓN", 15, startY3);
+
+                const conclusionData = [
+                    ["Ahorro Neto Real", reportCalcs.ahorroNeto.toFixed(2) + " €"],
+                    ["Ahorro en Horas (RPK)", reportCalcs.horasLiberadas.toFixed(1) + " h"],
+                    ["Rentabilidad", reportCalcs.status === 'GREEN' ? "RENTABLE" : "NO RENTABLE"],
+                    ["Precio Objetivo (Empate)", reportCalcs.precioObjetivo.toFixed(4) + " €/pz"],
+                    ["Cadencia Mínima Exigida", Math.ceil(reportCalcs.cadenciaExigida) + " pzs/h"]
+                ];
+
+                if (doc.autoTable) {
+                    doc.autoTable({
+                        startY: startY3 + 5,
+                        head: [["KPI Crítico", "Valor"]],
+                        body: conclusionData,
+                        theme: 'grid',
+                        headStyles: { fillColor: reportCalcs.status === 'GREEN' ? [34, 197, 94] : [220, 38, 38] },
+                        styles: { fontStyle: 'bold' }
+                    });
+                }
+
+                // Footer Note
+                doc.setFontSize(9);
+                doc.setTextColor(100, 100, 100);
+                const footerText = `Este documento es una simulación generada por RPK NEXUS v5.5. Los datos de subcontratación son ${reportCalcs.usingEstimate ? 'ESTIMADOS' : 'REALES'} basados en la oferta del proveedor.`;
+                const wrappedFooter = doc.splitTextToSize(footerText, 180);
+                const finalY = doc.lastAutoTable ? doc.lastAutoTable.finalY + 15 : 240;
+                doc.text(wrappedFooter, 15, finalY);
+
+                doc.save(`MakeBuy_RPK_${reportForm.referencia}.pdf`);
+            };
+
+            const saveSimulation = () => {
+                const newItem = {
+                    id: Date.now(),
+                    date: new Date().toLocaleDateString(),
+                    referencia: form.referencia,
+                    subcontrata: form.subcontrataNombre,
+                    cantidad: form.cantidad,
+                    ahorroNeto: calculations.ahorroNeto,
+                    horas: calculations.horasLiberadas,
+                    status: calculations.status,
+                    snapshot: { form: { ...form }, calculations: { ...calculations } }
+                };
+                setHistorical([newItem, ...historical.slice(0, 9)]);
+                exportPDF(); // Trigger auto-download
+                alert("Simulación guardada y PDF descargado.");
+            };
+
+            const deleteItem = (id) => {
+                setHistorical(prev => prev.filter(item => item.id !== id));
+            };
+
+            return (
+                <div className="min-h-screen p-4 md:p-8 max-w-7xl mx-auto space-y-8">
+                    {/* Header */}
+                    <header className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+                        <div>
+                            <h1 className="text-3xl font-bold tracking-tight text-white flex items-center gap-2">
+                                <span className="w-8 h-8 bg-rpk-accent rounded flex items-center justify-center text-xs">RPK</span>
+                                NEXUS <span className="text-rpk-accent">Control Tower</span>
+                            </h1>
+                            <p className="text-rpk-muted">Simulador Estratégico Make or Buy v5.5</p>
+                        </div>
+                        <div className={`px-4 py-2 rounded-full border flex items-center gap-2 text-sm font-semibold transition-colors duration-500 ${calculations.status === 'GREEN' ? 'bg-green-500/10 border-green-500 text-green-400' : 'bg-red-500/10 border-red-500 text-red-400'}`}>
+                            <div className={`w-2 h-2 rounded-full animate-pulse ${calculations.status === 'GREEN' ? 'bg-green-500' : 'bg-red-500'}`}></div>
+                            {calculations.status === 'GREEN' ? 'OPERACIÓN RENTABLE' : 'ALERTA: INVIABLE / NO RENTABLE'}
+                        </div>
+                    </header>
+
+                    <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+                        {/* Column 1: Production Data */}
+                        <div className="card-kpi space-y-6">
+                            <h2 className="text-lg font-semibold border-b border-white/5 pb-2">Datos de Producción</h2>
+
+                            <div className="grid gap-4">
+                                <div className="flex flex-col gap-1.5">
+                                    <label className="text-xs text-rpk-muted uppercase tracking-wider">Referencia</label>
+                                    <input value={form.referencia} onChange={e => handleGeneralChange('referencia', e.target.value)} className="input-rpk" placeholder="Identificador..." />
+                                </div>
+
+                                <div className="grid grid-cols-3 gap-3">
+                                    <div className="flex flex-col gap-1.5">
+                                        <label className="text-[10px] text-rpk-muted uppercase tracking-wider">Cantidad</label>
+                                        <input type="number" value={form.cantidad} onChange={e => handleGeneralChange('cantidad', parseInt(e.target.value))} className="input-rpk text-sm" />
+                                    </div>
+                                    <div className="flex flex-col gap-1.5">
+                                        <label className="text-[10px] text-rpk-muted uppercase tracking-wider">Palets</label>
+                                        <input type="number" value={form.palets} onChange={e => handleGeneralChange('palets', parseInt(e.target.value))} className="input-rpk text-sm" />
+                                    </div>
+                                    <div className="flex flex-col gap-1.5">
+                                        <label className="text-[10px] text-rpk-muted uppercase tracking-wider">Viajes</label>
+                                        <input type="number" value={form.viajes} onChange={e => handleGeneralChange('viajes', parseInt(e.target.value))} className="input-rpk text-sm text-blue-400 border-blue-500/20" />
+                                    </div>
+                                </div>
+
+                                <div className="flex flex-col gap-1.5">
+                                    <label className="text-xs text-rpk-muted uppercase tracking-wider">Cadencia Interna (pzs/h)</label>
+                                    <input type="number" value={form.cadenciaInterna} onChange={e => handleGeneralChange('cadenciaInterna', parseInt(e.target.value))} className="input-rpk" id="input-ci" />
+                                </div>
+
+                                <div className="flex flex-col gap-1.5 relative pt-4 border-t border-white/5">
+                                    <label className="text-xs text-rpk-accent uppercase tracking-wider font-semibold">Coste Interno RPK (€/h)</label>
+                                    <input type="number" value={form.costeHorario} onChange={e => handleGeneralChange('costeHorario', parseFloat(e.target.value))} className="input-rpk border-rpk-accent/30" placeholder="P Ej: 30" />
+                                    <div className="absolute right-3 bottom-2 text-xs text-rpk-muted pointer-events-none">€/h</div>
+                                </div>
+                            </div>
+
+                            <div className="pt-4 border-t border-white/5 space-y-4">
+                                <label className="flex items-center gap-3 cursor-pointer group">
+                                    <input type="checkbox" checked={form.esControlNuevo} onChange={e => handleGeneralChange('esControlNuevo', e.target.checked)} className="accent-rpk-accent w-4 h-4" />
+                                    <span className="text-sm">¿Es control nuevo / reoferta?</span>
+                                </label>
+
+                                {form.esControlNuevo && (
+                                    <div className="grid grid-cols-2 gap-4 animate-in slide-in-from-top-2 duration-300">
+                                        <div className="flex flex-col gap-1.5">
+                                            <label className="text-xs text-rpk-muted uppercase tracking-wider">Semanas Reof.</label>
+                                            <input type="number" value={form.semanasReoferta} onChange={e => handleGeneralChange('semanasReoferta', parseInt(e.target.value))} className="input-rpk" />
+                                        </div>
+                                        <div className="flex flex-col gap-1.5">
+                                            <label className="text-xs text-rpk-muted uppercase tracking-wider">Plazo (sem.)</label>
+                                            <input type="number" value={form.plazoSemanas} onChange={e => handleGeneralChange('plazoSemanas', parseInt(e.target.value))} className={`input-rpk ${form.plazoSemanas < form.semanasReoferta ? 'border-red-500/50 text-red-400' : ''}`} />
+                                        </div>
+                                    </div>
+                                )}
+                                {calculations.blockedByTime && (
+                                    <div className="p-3 bg-red-500/10 border border-red-500/30 rounded-lg text-xs text-red-400 font-medium">
+                                        🚨 BLOQUEO: Tiempo de reoferta superior al plazo. HACER EN INTERNO.
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+
+                        <div className="card-kpi space-y-6">
+                            <h2 className="text-lg font-semibold border-b border-white/5 pb-2 text-blue-400">Estructura Subcontrata</h2>
+
+                            <div className="grid gap-6">
+                                <div className="flex flex-col gap-1.5">
+                                    <label className="text-xs text-blue-400/80 uppercase tracking-wider">Nombre del Proveedor / Subcontrata</label>
+                                    <input value={form.subcontrataNombre} onChange={e => handleGeneralChange('subcontrataNombre', e.target.value)} className="input-rpk border-blue-500/20" placeholder="P Ej: Mecanizados Pérez..." />
+                                </div>
+
+                                <div className="flex flex-col gap-1.5 relative group">
+                                    <label className="text-xs text-blue-400/80 uppercase tracking-wider font-semibold">Coste Unitario Subcontrata (€/pz)</label>
+                                    <input type="number" step="0.001" value={form.costeUnitario} onChange={e => handleCostChange('unitario', e.target.value)} className="input-rpk border-blue-500/30 text-blue-100 font-bold" id="input-cu" />
+                                    <div className="absolute right-3 bottom-2 text-xs text-rpk-muted pointer-events-none italic">Factura</div>
+                                </div>
+
+                                <div className="flex flex-col gap-1.5 relative opacity-60 hover:opacity-100 transition-opacity">
+                                    <label className="text-xs text-rpk-muted uppercase tracking-wider">Simulación por Horas (Opcional)</label>
+                                    <input type="number" value={form.costeHorarioSub || ''} onChange={e => handleCostChange('horario_sub', e.target.value)} className="input-rpk border-dashed" placeholder="€/h..." />
+                                    <div className="absolute right-3 bottom-2 text-xs text-rpk-muted pointer-events-none italic">Cálculo guía</div>
+                                </div>
+
+                                <div className="p-4 bg-white/5 rounded-xl space-y-2">
+                                    <div className="flex justify-between items-center text-sm">
+                                        <span className="text-rpk-muted">Coste Logístico</span>
+                                        <div className="flex items-center gap-2">
+                                            <span className="font-semibold">{calculations.cLog} €</span>
+                                            <button
+                                                onClick={() => setForm(prev => ({ ...prev, showLogConfig: !prev.showLogConfig }))}
+                                                className="text-[10px] bg-white/5 hover:bg-white/10 px-1.5 py-0.5 rounded border border-white/10 transition-colors"
+                                            >
+                                                ⚙️
+                                            </button>
+                                        </div>
+                                    </div>
+
+                                    {form.showLogConfig && (
+                                        <div className="p-3 bg-black/20 rounded-lg border border-white/5 space-y-3 animate-in fade-in zoom-in-95 duration-200">
+                                            <div className="flex justify-between items-center gap-4">
+                                                <label className="text-[10px] text-rpk-muted uppercase">Coste/Palet (€)</label>
+                                                <input type="number" value={form.costePorPalet} onChange={e => handleGeneralChange('costePorPalet', parseFloat(e.target.value))} className="w-16 bg-transparent border-b border-white/10 text-xs text-right outline-none focus:border-rpk-accent" />
+                                            </div>
+                                            <div className="flex justify-between items-center gap-4">
+                                                <label className="text-[10px] text-rpk-muted uppercase">Coste Admin (Por Viaje)</label>
+                                                <input type="number" value={form.costeAdmin} onChange={e => handleGeneralChange('costeAdmin', parseFloat(e.target.value))} className="w-16 bg-transparent border-b border-white/10 text-xs text-right outline-none focus:border-rpk-accent" />
+                                            </div>
+                                        </div>
+                                    )}
+
+                                    <div className="flex justify-between items-center text-sm">
+                                        <span className="text-rpk-muted">Cadencia Empate (Break-even)</span>
+                                        <span className="font-mono text-rpk-accent">
+                                            {calculations.isInviable ? 'INVIABLE' : `${Math.ceil(calculations.cadenciaExigida)} pzs/h`}
+                                        </span>
+                                    </div>
+                                    <div className="flex justify-between items-center text-sm pt-2 border-t border-white/5">
+                                        <span className="text-rpk-muted">Precio Objetivo (Empate)</span>
+                                        <span className="font-mono text-green-400">
+                                            {calculations.precioObjetivo > 0 ? `${calculations.precioObjetivo.toFixed(4)} €/pz` : 'DEBAJO DE LOGÍSTICA'}
+                                        </span>
+                                    </div>
+                                </div>
+
+                                <div className="flex flex-col gap-1.5">
+                                    <label className="text-xs text-rpk-muted uppercase tracking-wider">Cadencia Prometida (Opcional)</label>
+                                    <input type="number" value={form.cadenciaPrometida || ''} onChange={e => handleGeneralChange('cadenciaPrometida', parseInt(e.target.value) || 0)} className="input-rpk border-blue-500/30 font-bold text-blue-400" placeholder="pzs/h..." />
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* Column 3: KPIs & Action */}
+                        <div className="space-y-6">
+                            <div className={`card-kpi border-2 ${calculations.status === 'GREEN' ? 'border-green-500/20' : 'border-red-500/20'}`}>
+                                <h2 className="text-lg font-semibold mb-6">Impacto en Operaciones</h2>
+
+                                <div className="grid gap-6">
+                                    <div>
+                                        <div className="text-3xl font-bold text-white tracking-widest">{calculations.horasLiberadas.toFixed(1)} <span className="text-sm font-normal text-rpk-muted">h</span></div>
+                                        <div className="text-xs text-rpk-muted uppercase mt-1">Horas Liberadas en Planta</div>
+                                    </div>
+
+                                    <div>
+                                        <div className={`text-3xl font-bold tracking-widest ${calculations.ahorroNeto > 0 ? 'text-green-400' : 'text-red-400'}`}>
+                                            {calculations.ahorroNeto.toLocaleString()} <span className="text-sm font-normal text-rpk-muted">€</span>
+                                        </div>
+                                        <div className="text-xs text-rpk-muted uppercase mt-1">Ahorro Neto Real</div>
+                                    </div>
+
+                                    <div>
+                                        <div className="text-xl font-semibold text-white">
+                                            {calculations.usingEstimate ? '~' : ''}
+                                            {calculations.diasEjecucion.toFixed(1)}
+                                            <span className="text-sm font-normal text-rpk-muted"> Días lab.</span>
+                                        </div>
+                                        <div className="text-xs text-rpk-muted uppercase mt-1">Plazo Estimado {calculations.usingEstimate ? '(Est.)' : 'Ejecución'}</div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div className="card-kpi">
+                                <h3 className="text-xs text-rpk-muted uppercase mb-3">Resumen para Reporte</h3>
+                                {calculations.status === 'GREEN' ? (
+                                    <p className="text-sm text-white/80 italic leading-relaxed mb-4">
+                                        "Al externalizar la referencia {form.referencia} ({form.cantidad.toLocaleString()} pzs) a una cadencia de {form.cadenciaPrometida} pzs/h, liberamos {calculations.horasLiberadas.toFixed(1)} horas de planta. Ahorro neto: {calculations.ahorroNeto.toFixed(0)}€."
+                                    </p>
+                                ) : (
+                                    <p className="text-sm text-red-400/80 italic mb-4">
+                                        La operación actual no cumple los criterios de rentabilidad o urgencia para subcontratación.
+                                    </p>
+                                )}
+
+                                <div className="flex gap-2">
+                                    <button
+                                        onClick={exportPDF}
+                                        className={`flex-1 ${calculations.status === 'GREEN' ? 'bg-green-600 hover:bg-green-500' : 'bg-red-600 hover:bg-red-500'} text-white text-sm font-bold py-4 rounded-xl transition-all flex items-center justify-center gap-3 shadow-lg shadow-black/20`}
+                                    >
+                                        <span className="text-lg">📄</span> PDF
+                                    </button>
+                                    <button
+                                        onClick={saveSimulation}
+                                        className="bg-white/10 hover:bg-white/20 text-white px-6 rounded-xl transition-all border border-white/5"
+                                        title="Guardar en historial"
+                                    >
+                                        💾
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* Historical Section */}
+                    <div className="card-kpi mt-8">
+                        <div className="flex justify-between items-center mb-6 border-b border-white/5 pb-4">
+                            <h2 className="text-lg font-semibold">Base de Datos de Externalización (Histórico Local)</h2>
+                            <span className="text-[10px] text-rpk-muted">LIMITADO A ÚLTIMOS 10 REGISTROS</span>
+                        </div>
+
+                        <div className="overflow-x-auto">
+                            <table className="w-full text-sm text-left">
+                                <thead className="text-[10px] text-rpk-muted uppercase tracking-wider">
+                                    <tr>
+                                        <th className="px-4 py-3">Fecha</th>
+                                        <th className="px-4 py-3">Ref</th>
+                                        <th className="px-4 py-3">Subcontrata</th>
+                                        <th className="px-4 py-3">Cantidad</th>
+                                        <th className="px-4 py-3">Hs. Liberadas</th>
+                                        <th className="px-4 py-3">Ahorro Neto</th>
+                                        <th className="px-4 py-3 text-right">Acción</th>
+                                    </tr>
+                                </thead>
+                                <tbody className="divide-y divide-white/5">
+                                    {historical.length === 0 ? (
+                                        <tr>
+                                            <td colSpan="6" className="px-4 py-8 text-center text-rpk-muted italic">No hay artículos externalizados guardados.</td>
+                                        </tr>
+                                    ) : (
+                                        historical.map(item => (
+                                            <tr key={item.id} className="hover:bg-white/5 transition-colors">
+                                                <td className="px-4 py-4 text-rpk-muted">{item.date}</td>
+                                                <td className="px-4 py-4 font-bold text-white">{item.referencia}</td>
+                                                <td className="px-4 py-4 text-blue-400 text-xs">{item.subcontrata || '-'}</td>
+                                                <td className="px-4 py-4">{item.cantidad.toLocaleString()}</td>
+                                                <td className="px-4 py-4">{item.horas.toFixed(1)} h</td>
+                                                <td className={`px-4 py-4 font-bold ${item.status === 'GREEN' ? 'text-green-400' : 'text-red-400'}`}>
+                                                    {item.ahorroNeto.toLocaleString()} €
+                                                </td>
+                                                <td className="px-4 py-4 text-right">
+                                                    <div className="flex justify-end gap-3">
+                                                        <button 
+                                                            onClick={() => exportPDF(item)} 
+                                                            className="text-white hover:text-white transition-colors opacity-60 hover:opacity-100"
+                                                            title="Re-descargar PDF Histórico"
+                                                        >
+                                                            📄
+                                                        </button>
+                                                        <button 
+                                                            onClick={() => deleteItem(item.id)} 
+                                                            className="text-rpk-muted hover:text-red-400 transition-colors"
+                                                        >
+                                                            🗑️
+                                                        </button>
+                                                    </div>
+                                                </td>
+                                            </tr>
+                                        ))
+                                    )}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+
+                    <footer className="text-center text-[10px] text-rpk-muted uppercase tracking-[0.2em] pt-8 pb-8">
+                        RPK NEXUS v5.5 • INDUSTRY 5.0 CORE • SECURE ANALYTICS
+                    </footer>
+                </div>
+            );
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+
+</html>

@@ -44,6 +44,8 @@
         .glass { @apply bg-rpk-panel bg-opacity-60 backdrop-blur-md border border-white/10; }
         .input-rpk { @apply bg-rpk-bg border border-white/10 rounded-lg p-2.5 focus:border-rpk-accent outline-none transition-all text-sm; }
         .card-kpi { @apply glass rounded-xl p-6 transition-all hover:scale-[1.02]; }
+        .tooltip-p { @apply absolute z-50 invisible group-hover:visible opacity-0 group-hover:opacity-100 bg-black/90 text-white text-[11px] p-2 rounded border border-white/10 w-48 -top-2 left-1/2 -translate-x-1/2 -translate-y-full transition-all duration-200 pointer-events-none; }
+        .tooltip-p::after { content: ""; @apply absolute top-full left-1/2 -translate-x-1/2 border-[6px] border-transparent border-t-black/90; }
         input[type="number"]::-webkit-inner-spin-button, 
         input[type="number"]::-webkit-outer-spin-button { 
             -webkit-appearance: none; 
@@ -57,6 +59,12 @@
 
     <script type="text/babel">
         const { useState, useEffect, useMemo } = React;
+
+        const InfoTooltip = ({ text }) => (
+            <div className="tooltip-p">
+                {text}
+            </div>
+        );
 
         const App = () => {
             const [form, setForm] = useState({
@@ -159,7 +167,9 @@
                 // Correct Concept: Liberated hours are the hours the RPK machines ARE NOT running this job.
                 const horasLiberadas = horasInternas;
 
-                const ahorroNeto = (horasInternas * form.costeHorario) - ((form.cantidad * form.costeUnitario) + cLog);
+                const costeTotalInterno = horasInternas * form.costeHorario;
+                const costeTotalExterno = (form.cantidad * form.costeUnitario) + cLog;
+                const ahorroNeto = costeTotalInterno - costeTotalExterno;
                 const diasEjecucion = horasExternas / form.jornadaLaboral;
 
                 // Blocking logic
@@ -176,6 +186,8 @@
                     cadenciaExigida,
                     precioObjetivo,
                     horasLiberadas,
+                    costeTotalInterno,
+                    costeTotalExterno,
                     ahorroNeto,
                     diasEjecucion,
                     status,
@@ -269,6 +281,8 @@
                 doc.text("3. CONCLUSIÓN Y OBJETIVOS DE NEGOCIACIÓN", 15, startY3);
 
                 const conclusionData = [
+                    ["Coste Total Interno", reportCalcs.costeTotalInterno.toFixed(2) + " €"],
+                    ["Coste Total Externo", reportCalcs.costeTotalExterno.toFixed(2) + " €"],
                     ["Ahorro Neto Real", reportCalcs.ahorroNeto.toFixed(2) + " €"],
                     ["Ahorro en Horas (RPK)", reportCalcs.horasLiberadas.toFixed(1) + " h"],
                     ["Rentabilidad", reportCalcs.status === 'GREEN' ? "RENTABLE" : "NO RENTABLE"],
@@ -368,7 +382,11 @@
                                 </div>
 
                                 <div className="flex flex-col gap-1.5 relative pt-4 border-t border-white/5">
-                                    <label className="text-xs text-rpk-accent uppercase tracking-wider font-semibold">Coste Interno RPK (€/h)</label>
+                                    <label className="text-xs text-rpk-accent uppercase tracking-wider font-semibold flex items-center gap-1 group relative">
+                                        Coste Interno RPK (€/h)
+                                        <span className="text-[10px] opacity-40">ⓘ</span>
+                                        <InfoTooltip text="Coste teórico por hora de máquina y operario en planta RPK." />
+                                    </label>
                                     <input type="number" value={form.costeHorario} onChange={e => handleGeneralChange('costeHorario', parseFloat(e.target.value))} className="input-rpk border-rpk-accent/30" placeholder="P Ej: 30" />
                                     <div className="absolute right-3 bottom-2 text-xs text-rpk-muted pointer-events-none">€/h</div>
                                 </div>
@@ -410,7 +428,11 @@
                                 </div>
 
                                 <div className="flex flex-col gap-1.5 relative group">
-                                    <label className="text-xs text-blue-400/80 uppercase tracking-wider font-semibold">Coste Unitario Subcontrata (€/pz)</label>
+                                    <label className="text-xs text-blue-400/80 uppercase tracking-wider font-semibold flex items-center gap-1 group relative">
+                                        Coste Unitario Subcontrata (€/pz)
+                                        <span className="text-[10px] opacity-40">ⓘ</span>
+                                        <InfoTooltip text="Precio final por unidad facturado por el proveedor externo." />
+                                    </label>
                                     <input type="number" step="0.001" value={form.costeUnitario} onChange={e => handleCostChange('unitario', e.target.value)} className="input-rpk border-blue-500/30 text-blue-100 font-bold" id="input-cu" />
                                     <div className="absolute right-3 bottom-2 text-xs text-rpk-muted pointer-events-none italic">Factura</div>
                                 </div>
@@ -423,7 +445,11 @@
 
                                 <div className="p-4 bg-white/5 rounded-xl space-y-2">
                                     <div className="flex justify-between items-center text-sm">
-                                        <span className="text-rpk-muted">Coste Logístico</span>
+                                        <span className="text-rpk-muted flex items-center gap-1 group relative">
+                                            Coste Logístico
+                                            <span className="text-[10px] opacity-40">ⓘ</span>
+                                            <InfoTooltip text="Suma de transporte por palet y gastos administrativos por cada viaje realizado." />
+                                        </span>
                                         <div className="flex items-center gap-2">
                                             <span className="font-semibold">{calculations.cLog} €</span>
                                             <button
@@ -449,13 +475,21 @@
                                     )}
 
                                     <div className="flex justify-between items-center text-sm">
-                                        <span className="text-rpk-muted">Cadencia Empate (Break-even)</span>
+                                        <span className="text-rpk-muted flex items-center gap-1 group relative">
+                                            Cadencia Empate (Break-even)
+                                            <span className="text-[10px] opacity-40">ⓘ</span>
+                                            <InfoTooltip text="Mínima velocidad del proveedor necesaria para que el coste externo sea igual al interno." />
+                                        </span>
                                         <span className="font-mono text-rpk-accent">
                                             {calculations.isInviable ? 'INVIABLE' : `${Math.ceil(calculations.cadenciaExigida)} pzs/h`}
                                         </span>
                                     </div>
                                     <div className="flex justify-between items-center text-sm pt-2 border-t border-white/5">
-                                        <span className="text-rpk-muted">Precio Objetivo (Empate)</span>
+                                        <span className="text-rpk-muted flex items-center gap-1 group relative">
+                                            Precio Objetivo (Empate)
+                                            <span className="text-[10px] opacity-40">ⓘ</span>
+                                            <InfoTooltip text="Máximo precio unitario aceptable para no tener pérdidas respecto a la fabricación interna." />
+                                        </span>
                                         <span className="font-mono text-green-400">
                                             {calculations.precioObjetivo > 0 ? `${calculations.precioObjetivo.toFixed(4)} €/pz` : 'DEBAJO DE LOGÍSTICA'}
                                         </span>
@@ -475,16 +509,43 @@
                                 <h2 className="text-lg font-semibold mb-6">Impacto en Operaciones</h2>
 
                                 <div className="grid gap-6">
-                                    <div>
+                                    <div className="grid grid-cols-2 gap-4">
+                                        <div>
+                                            <div className="text-xl font-bold text-white/90">{calculations.costeTotalInterno.toLocaleString()} €</div>
+                                            <div className="text-[10px] text-rpk-muted uppercase mt-1 flex items-center gap-1 group relative">
+                                                Coste Total Interno
+                                                <span className="text-[9px] opacity-40">ⓘ</span>
+                                                <InfoTooltip text="Gasto total estimado si fabricamos en RPK (Horas x Coste/h)." />
+                                            </div>
+                                        </div>
+                                        <div>
+                                            <div className="text-xl font-bold text-blue-400">{calculations.costeTotalExterno.toLocaleString()} €</div>
+                                            <div className="text-[10px] text-rpk-muted uppercase mt-1 flex items-center gap-1 group relative">
+                                                Coste Total Externo
+                                                <span className="text-[9px] opacity-40">ⓘ</span>
+                                                <InfoTooltip text="Inversión total externa: Lote x Precio Unitario + Logística." />
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    <div className="pt-4 border-t border-white/5">
                                         <div className="text-3xl font-bold text-white tracking-widest">{calculations.horasLiberadas.toFixed(1)} <span className="text-sm font-normal text-rpk-muted">h</span></div>
-                                        <div className="text-xs text-rpk-muted uppercase mt-1">Horas Liberadas en Planta</div>
+                                        <div className="text-xs text-rpk-muted uppercase mt-1 flex items-center gap-1 group relative">
+                                            Horas Liberadas en Planta
+                                            <span className="text-[10px] opacity-40">ⓘ</span>
+                                            <InfoTooltip text="Tiempo total de máquina RPK que queda disponible para otros trabajos tras subcontratar este lote." />
+                                        </div>
                                     </div>
 
                                     <div>
                                         <div className={`text-3xl font-bold tracking-widest ${calculations.ahorroNeto > 0 ? 'text-green-400' : 'text-red-400'}`}>
                                             {calculations.ahorroNeto.toLocaleString()} <span className="text-sm font-normal text-rpk-muted">€</span>
                                         </div>
-                                        <div className="text-xs text-rpk-muted uppercase mt-1">Ahorro Neto Real</div>
+                                        <div className="text-xs text-rpk-muted uppercase mt-1 flex items-center gap-1 group relative">
+                                            Ahorro Neto Real
+                                            <span className="text-[10px] opacity-40">ⓘ</span>
+                                            <InfoTooltip text="Diferencia económica total: (Coste Fabricación RPK) - (Coste Factura Proveedor + Logística)." />
+                                        </div>
                                     </div>
 
                                     <div>
